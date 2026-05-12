@@ -1,5 +1,4 @@
-import { buildRenderContext } from "@/lib/docx";
-import type { CvBuilderStateType } from "@/lib/state";
+import type { RenderContext } from "@/lib/docx";
 import Docxtemplater from "docxtemplater";
 import PizZip from "pizzip";
 import fs from "node:fs";
@@ -11,16 +10,16 @@ export const dynamic = "force-dynamic";
 /**
  * POST /api/render-docx
  *
- * Body: the accumulated final state from /api/run (whatever the client
- * collected from the SSE stream). We trust the client to send back what we
- * gave it — this endpoint is for the same browser session, not a public API.
+ * Body: a RenderContext object built client-side from the user-edited section
+ * cards. Sending the pre-built context (rather than raw agent state) means
+ * edits the user makes in the UI are always reflected in the download.
  *
  * Response: the rendered .docx as a binary attachment.
  */
 export async function POST(request: Request) {
-  let state: CvBuilderStateType;
+  let data: RenderContext;
   try {
-    state = (await request.json()) as CvBuilderStateType;
+    data = (await request.json()) as RenderContext;
   } catch {
     return Response.json({ error: "Body must be JSON." }, { status: 400 });
   }
@@ -40,8 +39,6 @@ export async function POST(request: Request) {
       { status: 500 },
     );
   }
-
-  const data = buildRenderContext(state);
 
   let outBuffer: Buffer;
   try {
@@ -72,7 +69,7 @@ export async function POST(request: Request) {
   }
 
   const safeName =
-    (state.candidate?.name ?? "cv")
+    (data.candidate_name_upper ?? "cv")
       .replace(/[^a-zA-Z0-9-_ ]+/g, "")
       .trim()
       .replace(/\s+/g, "_") || "cv";
