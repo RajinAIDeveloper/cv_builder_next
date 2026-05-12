@@ -20,6 +20,7 @@ import {
   WorkflowStatus,
 } from "@/lib/workflow";
 import { applyPatchToMemory, renderSectionContent } from "@/lib/ui-format";
+import { sectionsToRenderContext } from "@/lib/sections-to-render";
 
 type AppPhase = "input" | "running" | "complete";
 
@@ -294,17 +295,16 @@ export function CvBuilderApp() {
   async function createDocx() {
     if (!hasSectionContent || isRenderingDocx) return;
 
-    if (!finalStateRef.current) {
-      setLatestNote("No agent state to render yet — run the graph first.");
-      return;
-    }
+    const candidateName =
+      (finalStateRef.current?.candidate as { name?: string } | null)?.name ?? "";
+    const renderContext = sectionsToRenderContext(sections, candidateName);
 
     setIsRenderingDocx(true);
     try {
       const response = await fetch("/api/render-docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(finalStateRef.current),
+        body: JSON.stringify(renderContext),
       });
 
       if (!response.ok) {
