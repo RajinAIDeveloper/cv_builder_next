@@ -452,6 +452,32 @@ export function CvBuilderApp() {
 
         {phase === "complete" ? (
           <motion.div layout className="space-y-4">
+            <div className="grid w-full grid-cols-2 gap-3 text-center text-xs text-slate-500 sm:grid-cols-4">
+              <div className="rounded border border-slate-200 bg-white p-3">
+                <div className="text-[10px] uppercase tracking-wide">Elapsed</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {formatElapsed(elapsedSec)}
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 bg-white p-3">
+                <div className="text-[10px] uppercase tracking-wide">LLM calls</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? usage.calls : "—"}
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 bg-white p-3">
+                <div className="text-[10px] uppercase tracking-wide">Tokens used</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? usage.tokens.toLocaleString() : "—"}
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 bg-white p-3">
+                <div className="text-[10px] uppercase tracking-wide">Est. cost</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? `$${usage.cost.toFixed(4)}` : "—"}
+                </div>
+              </div>
+            </div>
             <SectionsGrid sections={sections} onSectionChange={updateSection} />
           </motion.div>
         ) : null}
