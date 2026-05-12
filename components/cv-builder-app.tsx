@@ -1,16 +1,16 @@
 "use client";
 
-import { useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { motion } from "framer-motion";
-import { Download, Pause, Play, RotateCcw } from "lucide-react";
+import { Download, FileText, Pause, Play, RotateCcw } from "lucide-react";
 
 import { FileInputPanel } from "@/components/file-input-panel";
+import { LogPanel } from "@/components/log-panel";
 import { MemoryPanel } from "@/components/memory-panel";
 import { SectionsGrid } from "@/components/sections-grid";
 import { Button } from "@/components/ui/button";
 import { WorkflowDiagram } from "@/components/workflow-diagram";
 import {
-  createWorkflowSteps,
   initialMemory,
   MemorySnapshot,
   sectionShells,
@@ -19,6 +19,7 @@ import {
   workflowNodes,
   WorkflowStatus,
 } from "@/lib/workflow";
+import { applyPatchToMemory, renderSectionContent } from "@/lib/ui-format";
 
 type AppPhase = "input" | "running" | "complete";
 
@@ -49,6 +50,12 @@ const idleStatuses = workflowNodes.reduce(
   (acc, node) => ({ ...acc, [node.id]: "idle" as WorkflowStatus }),
   {} as Record<WorkflowNodeId, WorkflowStatus>,
 );
+const queuedStatuses = workflowNodes.reduce(
+  (acc, node) => ({ ...acc, [node.id]: "queued" as WorkflowStatus }),
+  {} as Record<WorkflowNodeId, WorkflowStatus>,
+);
+const nodeById = new Map(workflowNodes.map((node) => [node.id, node]));
+const maxLogLines = 600;
 
 export function CvBuilderApp() {
   const [cvText, setCvText] = useState(sampleCv);
@@ -63,7 +70,30 @@ export function CvBuilderApp() {
   const [isRunning, setIsRunning] = useState(false);
   const [isRenderingDocx, setIsRenderingDocx] = useState(false);
   const [phase, setPhase] = useState<AppPhase>("input");
+  const [logLines, setLogLines] = useState<string[]>([]);
+  const [eventCount, setEventCount] = useState(0);
+  const [startedAt, setStartedAt] = useState<number | null>(null);
+  const [elapsedSec, setElapsedSec] = useState(0);
+  const [usage, setUsage] = useState<{
+    tokens: number;
+    cost: number;
+    calls: number;
+  } | null>(null);
   const cancelRef = useRef(false);
+  // Accumulated final state from /api/run's `done` event; sent verbatim to
+  // /api/render-docx so the server can build the docx render context from
+  // the same shape the agent produced.
+  const finalStateRef = useRef<Record<string, unknown> | null>(null);
+
+  // Live elapsed-time ticker — only runs while a graph is in flight.
+  useEffect(() => {
+    if (!isRunning || startedAt === null) return;
+    setElapsedSec(0);
+    const id = window.setInterval(() => {
+      setElapsedSec(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+    return () => window.clearInterval(id);
+  }, [isRunning, startedAt]);
 
   const canRun = useMemo(() => cvText.trim().length > 0 && jdText.trim().length > 0, [cvText, jdText]);
   const hasSectionContent = useMemo(
@@ -75,43 +105,66 @@ export function CvBuilderApp() {
     if (!canRun || isRunning) return;
 
     cancelRef.current = false;
+    finalStateRef.current = null;
+    setUsage(null);
     setIsRunning(true);
     setPhase("running");
-    setStatuses(
-      workflowNodes.reduce(
-        (acc, node) => ({ ...acc, [node.id]: "queued" as WorkflowStatus }),
-        {} as Record<WorkflowNodeId, WorkflowStatus>,
-      ),
-    );
+    setStatuses(queuedStatuses);
     setMemory(initialMemory);
     setSections(sectionShells.map((section) => ({ ...section, content: [] })));
+    setEventCount(0);
+    setStartedAt(Date.now());
+    setElapsedSec(0);
     setLatestNote("Graph started. Inputs are now entering shared memory.");
+    setLogLines([
+      line("CV BUILDER v4 - live graph pipeline"),
+      line(`Raw JD chars: ${jdText.length}   Raw CV chars: ${cvText.length}`),
+      line("Building graph ..."),
+      line("Invoking graph ..."),
+    ]);
 
-    for (const step of createWorkflowSteps(cvText, jdText)) {
-      if (cancelRef.current) break;
+    try {
+      const response = await fetch("/api/run", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ raw_jd: jdText, raw_cv: cvText }),
+      });
 
-      setActiveNode(step.nodeId);
-      setStatuses((current) => ({ ...current, [step.nodeId]: "running" }));
-      setLatestNote(step.note);
-
-      await wait(step.duration);
-      if (cancelRef.current) break;
-
-      setMemory((current) => ({
-        ...current,
-        ...step.memoryPatch,
-      }));
-
-      if (step.sectionsPatch) {
-        setSections((current) =>
-          current.map((section) => ({
-            ...section,
-            content: step.sectionsPatch?.[section.id] ?? section.content,
-          })),
-        );
+      if (!response.ok || !response.body) {
+        throw new Error(`Agent run failed (HTTP ${response.status}).`);
       }
 
-      setStatuses((current) => ({ ...current, [step.nodeId]: "done" }));
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        if (cancelRef.current) {
+          await reader.cancel();
+          break;
+        }
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+
+        // SSE frames are separated by a blank line (\n\n).
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+
+        for (const frame of frames) {
+          const parsed = parseSseFrame(frame);
+          if (!parsed) continue;
+          handleSseEvent(parsed.event, parsed.data);
+        }
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setLatestNote(`Error: ${msg}`);
+      pushLogLines([`ERROR: ${msg}`]);
+      setIsRunning(false);
+      setActiveNode(null);
+      setPhase("input");
+      return;
     }
 
     setActiveNode(null);
@@ -119,11 +172,89 @@ export function CvBuilderApp() {
     if (!cancelRef.current) {
       setPhase("complete");
       setLatestNote("Graph complete. Six CV sections are ready for review.");
+      pushLogLines([
+        "Graph completed.",
+        "Generated sections: summary, experience, education, training, others, references",
+      ]);
+    }
+  }
+
+  function handleSseEvent(event: string, data: string) {
+    if (event === "ready") {
+      setEventCount((n) => n + 1);
+      pushLogLines(["Stream connected (ready frame received)."]);
+      return;
+    }
+    if (event === "usage") {
+      const obj = safeJson<{
+        prompt_tokens: number;
+        completion_tokens: number;
+        total_tokens: number;
+        cost_usd: number;
+        calls: number;
+      }>(data);
+      if (obj) {
+        setUsage({
+          tokens: obj.total_tokens,
+          cost: obj.cost_usd,
+          calls: obj.calls,
+        });
+      }
+      return;
+    }
+    if (event === "node-end") {
+      const obj = safeJson<{
+        node: string;
+        uiNode: WorkflowNodeId | null;
+        sections: SectionResult["id"][];
+        patch: Record<string, unknown>;
+      }>(data);
+      if (!obj) return;
+      setEventCount((n) => n + 1);
+
+      // 1. Light up the workflow node.
+      if (obj.uiNode) {
+        setActiveNode(obj.uiNode);
+        setStatuses((current) => ({ ...current, [obj.uiNode!]: "done" }));
+      }
+
+      // 2. Update the memory panel.
+      setMemory((current) => applyPatchToMemory(current, obj.patch));
+
+      // 3. Fill section cards whose data just arrived.
+      if (obj.sections.length > 0) {
+        setSections((current) =>
+          current.map((section) => {
+            if (!obj.sections.includes(section.id)) return section;
+            const content = renderSectionContent(section.id, obj.patch);
+            return content ? { ...section, content } : section;
+          }),
+        );
+      }
+
+      // 4. Log.
+      const node = obj.uiNode ? nodeById.get(obj.uiNode) : undefined;
+      pushLogLines([
+        `  [node] ${node?.label ?? obj.node} — done` +
+          (obj.sections.length > 0 ? ` (section: ${obj.sections.join(", ")})` : ""),
+      ]);
+      setLatestNote(`${node?.label ?? obj.node} completed.`);
+    } else if (event === "error") {
+      const obj = safeJson<{ message: string }>(data);
+      const msg = obj?.message ?? "Unknown agent error.";
+      setLatestNote(`Error: ${msg}`);
+      pushLogLines([`ERROR: ${msg}`]);
+      cancelRef.current = true;
+    } else if (event === "done") {
+      const obj = safeJson<{ final: Record<string, unknown> }>(data);
+      if (obj?.final) finalStateRef.current = obj.final;
+      pushLogLines(["Graph emitted `done` event."]);
     }
   }
 
   function resetWorkflow() {
     cancelRef.current = true;
+    finalStateRef.current = null;
     setIsRunning(false);
     setActiveNode(null);
     setStatuses(idleStatuses);
@@ -131,6 +262,10 @@ export function CvBuilderApp() {
     setSections(sectionShells.map((section) => ({ ...section, content: [] })));
     setLatestNote("");
     setPhase("input");
+    setLogLines([]);
+    setEventCount(0);
+    setStartedAt(null);
+    setElapsedSec(0);
   }
 
   function stopWorkflow() {
@@ -139,19 +274,18 @@ export function CvBuilderApp() {
     setActiveNode(null);
     setPhase("input");
     setLatestNote("Graph stopped. Inputs are still available.");
+    pushLogLines(["Graph stopped by user."]);
+  }
+
+  function pushLogLines(messages: string[]) {
+    setLogLines((current) => [...current, ...messages.map(line)].slice(-maxLogLines));
   }
 
   function updateSection(id: SectionResult["id"], value: string) {
     setSections((current) =>
       current.map((section) =>
         section.id === id
-          ? {
-              ...section,
-              content: value
-                .split(/\r?\n/)
-                .map((line) => line.trim())
-                .filter(Boolean),
-            }
+          ? { ...section, content: value.split(/\r?\n/) }
           : section,
       ),
     );
@@ -160,20 +294,24 @@ export function CvBuilderApp() {
   async function createDocx() {
     if (!hasSectionContent || isRenderingDocx) return;
 
+    if (!finalStateRef.current) {
+      setLatestNote("No agent state to render yet — run the graph first.");
+      return;
+    }
+
     setIsRenderingDocx(true);
     try {
       const response = await fetch("/api/render-docx", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          candidateName: memory.candidate === "Not parsed" ? "Candidate" : memory.candidate,
-          jdTitle: memory.jd === "Not parsed" ? "Target role" : memory.jd,
-          sections: sections.map(({ id, title, content }) => ({ id, title, content })),
-        }),
+        body: JSON.stringify(finalStateRef.current),
       });
 
       if (!response.ok) {
-        const message = await response.text();
+        const ct = response.headers.get("Content-Type") ?? "";
+        const message = ct.includes("application/json")
+          ? ((await response.json()) as { error?: string }).error
+          : await response.text();
         throw new Error(message || "DOCX render failed");
       }
 
@@ -204,13 +342,27 @@ export function CvBuilderApp() {
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
               {descriptionForPhase(phase)}
             </p>
+            {/* Running-phase progress is now shown in the loader card below. */}
           </div>
           <div className="flex flex-wrap gap-2">
             {phase === "input" ? (
-              <Button onClick={runWorkflow} disabled={!canRun || isRunning} size="lg">
-                <Play />
-                Run graph
-              </Button>
+              <>
+                <Button
+                  onClick={() => {
+                    setCvText(sampleCv);
+                    setJdText(sampleJd);
+                  }}
+                  variant="outline"
+                  size="lg"
+                >
+                  <FileText />
+                  Load sample
+                </Button>
+                <Button onClick={runWorkflow} disabled={!canRun || isRunning} size="lg">
+                  <Play />
+                  Run graph
+                </Button>
+              </>
             ) : null}
             {phase === "running" ? (
               <Button onClick={stopWorkflow} disabled={!isRunning} variant="outline" size="lg">
@@ -259,9 +411,37 @@ export function CvBuilderApp() {
         ) : null}
 
         {phase === "running" ? (
-          <motion.div layout className="space-y-4">
-            <WorkflowDiagram nodes={workflowNodes} statuses={statuses} activeNode={activeNode} />
-            <MemoryPanel memory={memory} latestNote={latestNote} />
+          <motion.div
+            layout
+            className="flex min-h-[50vh] flex-col items-center justify-center gap-6 rounded-lg border border-slate-200 bg-white p-12"
+          >
+            <div className="h-12 w-12 animate-spin rounded-full border-4 border-slate-200 border-t-sky-600" />
+            <div className="text-center">
+              <div className="text-2xl font-semibold text-slate-900 tabular-nums">
+                {formatElapsed(elapsedSec)}
+              </div>
+              <div className="mt-1 text-sm text-slate-500">Agent is running</div>
+            </div>
+            <div className="grid w-full max-w-md grid-cols-3 gap-3 text-center text-xs text-slate-500">
+              <div className="rounded border border-slate-200 p-3">
+                <div className="text-[10px] uppercase tracking-wide">LLM calls</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? usage.calls : "—"}
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="text-[10px] uppercase tracking-wide">Tokens used</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? usage.tokens.toLocaleString() : "—"}
+                </div>
+              </div>
+              <div className="rounded border border-slate-200 p-3">
+                <div className="text-[10px] uppercase tracking-wide">Est. cost</div>
+                <div className="mt-1 font-mono text-slate-700">
+                  {usage ? `$${usage.cost.toFixed(4)}` : "—"}
+                </div>
+              </div>
+            </div>
           </motion.div>
         ) : null}
 
@@ -283,7 +463,7 @@ function titleForPhase(phase: AppPhase) {
 
 function descriptionForPhase(phase: AppPhase) {
   if (phase === "running") {
-    return "The graph is running. Watch node calls and shared memory changes before the final sections appear.";
+    return "Generating tailored CV sections. This usually takes 30-90 seconds.";
   }
   if (phase === "complete") {
     return "Review and edit the generated CV sections, then download a DOCX rendered with the v3 Word template.";
@@ -291,6 +471,32 @@ function descriptionForPhase(phase: AppPhase) {
   return "Start by pasting or uploading the candidate CV and job description. The graph view appears after you run it.";
 }
 
-function wait(ms: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, ms));
+function line(message: string) {
+  return `[${new Date().toLocaleTimeString()}] ${message}`;
+}
+
+function formatElapsed(sec: number): string {
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}:${s.toString().padStart(2, "0")}`;
+}
+
+function parseSseFrame(frame: string): { event: string; data: string } | null {
+  const lines = frame.split("\n");
+  let event = "";
+  let data = "";
+  for (const ln of lines) {
+    if (ln.startsWith("event:")) event = ln.slice(6).trim();
+    else if (ln.startsWith("data:")) data = ln.slice(5).trim();
+  }
+  if (!event) return null;
+  return { event, data };
+}
+
+function safeJson<T>(data: string): T | null {
+  try {
+    return JSON.parse(data) as T;
+  } catch {
+    return null;
+  }
 }

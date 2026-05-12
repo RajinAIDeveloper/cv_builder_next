@@ -1,6 +1,6 @@
 "use client";
 
-import { motion } from "framer-motion";
+import { memo, useMemo } from "react";
 import { Database } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
@@ -12,20 +12,24 @@ type MemoryPanelProps = {
   latestNote: string;
 };
 
-export function MemoryPanel({ memory, latestNote }: MemoryPanelProps) {
-  const entries = [
-    ["rawCv", memory.rawCv],
-    ["rawJd", memory.rawJd],
-    ["jd", memory.jd],
-    ["candidate", memory.candidate],
-    ["summary", memory.summary],
-    ["experience", memory.experience],
-    ["education", memory.education],
-    ["training", memory.training],
-    ["others", memory.others],
-    ["references", memory.references],
-    ["critiques", memory.critiques],
-  ] as const;
+function MemoryPanelComponent({ memory, latestNote }: MemoryPanelProps) {
+  const entries = useMemo(
+    () =>
+      [
+        ["rawCv", memory.rawCv],
+        ["rawJd", memory.rawJd],
+        ["jd", memory.jd],
+        ["candidate", memory.candidate],
+        ["summary", memory.summary],
+        ["experience", memory.experience],
+        ["education", memory.education],
+        ["training", memory.training],
+        ["others", memory.others],
+        ["references", memory.references],
+        ["critiques", memory.critiques],
+      ] as const,
+    [memory],
+  );
 
   return (
     <Card>
@@ -44,22 +48,30 @@ export function MemoryPanel({ memory, latestNote }: MemoryPanelProps) {
         </div>
         <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-3">
           {entries.map(([key, value]) => (
-            <motion.div
-              key={key}
-              layout
-              className="min-h-24 rounded-lg border border-slate-200 bg-slate-50 p-3"
-            >
-              <Badge tone="neutral" className="mb-2 font-mono">
-                {key}
-              </Badge>
-              <div className="text-xs leading-5 text-slate-700">{formatValue(value)}</div>
-            </motion.div>
+            <MemoryEntry key={key} name={key} value={value} />
           ))}
         </div>
       </CardContent>
     </Card>
   );
 }
+
+const MemoryEntry = memo(function MemoryEntry({
+  name,
+  value,
+}: {
+  name: string;
+  value: string | string[];
+}) {
+  return (
+    <div className="min-h-24 rounded-lg border border-slate-200 bg-slate-50 p-3">
+      <Badge tone="neutral" className="mb-2 font-mono">
+        {name}
+      </Badge>
+      <div className="text-xs leading-5 text-slate-700">{formatValue(value)}</div>
+    </div>
+  );
+});
 
 function formatValue(value: string | string[]) {
   if (Array.isArray(value)) {
@@ -75,3 +87,5 @@ function formatValue(value: string | string[]) {
 
   return value;
 }
+
+export const MemoryPanel = memo(MemoryPanelComponent);

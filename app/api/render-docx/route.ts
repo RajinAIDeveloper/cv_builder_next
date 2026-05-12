@@ -1,75 +1,88 @@
-import { spawn } from "node:child_process";
-import { promises as fs } from "node:fs";
-import os from "node:os";
+import { buildRenderContext } from "@/lib/docx";
+import type { CvBuilderStateType } from "@/lib/state";
+import Docxtemplater from "docxtemplater";
+import PizZip from "pizzip";
+import fs from "node:fs";
 import path from "node:path";
 
 export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
 
-type RenderPayload = {
-  candidateName?: string;
-  jdTitle?: string;
-  sections?: Array<{
-    id: string;
-    title: string;
-    content: string[];
-  }>;
-};
-
+/**
+ * POST /api/render-docx
+ *
+ * Body: the accumulated final state from /api/run (whatever the client
+ * collected from the SSE stream). We trust the client to send back what we
+ * gave it — this endpoint is for the same browser session, not a public API.
+ *
+ * Response: the rendered .docx as a binary attachment.
+ */
 export async function POST(request: Request) {
-  const payload = (await request.json()) as RenderPayload;
-
-  if (!payload.sections?.length) {
-    return new Response("No CV sections were provided.", { status: 400 });
-  }
-
-  const workDir = await fs.mkdtemp(path.join(os.tmpdir(), "cv-builder-"));
-  const payloadPath = path.join(workDir, "payload.json");
-  const outputPath = path.join(workDir, "tailored_cv.docx");
-  const scriptPath = path.join(process.cwd(), "scripts", "render_docx.py");
-  const templatePath = path.resolve(process.cwd(), "..", "..", "v3", "files", "cv_template.docx");
-  const pythonPath =
-    process.env.PYTHON_PATH ||
-    path.resolve(process.cwd(), "..", "..", "..", "..", "venv", "Scripts", "python.exe");
-
-  await fs.writeFile(payloadPath, JSON.stringify(payload), "utf-8");
-
+  let state: CvBuilderStateType;
   try {
-    await runPython(pythonPath, [scriptPath, payloadPath, templatePath, outputPath]);
-    const file = await fs.readFile(outputPath);
-
-    return new Response(file, {
-      headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        "Content-Disposition": 'attachment; filename="tailored_cv.docx"',
-      },
-    });
-  } catch (error) {
-    const message = error instanceof Error ? error.message : "DOCX render failed.";
-    return new Response(message, { status: 500 });
-  } finally {
-    await fs.rm(workDir, { recursive: true, force: true });
+    state = (await request.json()) as CvBuilderStateType;
+  } catch {
+    return Response.json({ error: "Body must be JSON." }, { status: 400 });
   }
-}
 
-function runPython(command: string, args: string[]) {
-  return new Promise<void>((resolve, reject) => {
-    const child = spawn(command, args, {
-      cwd: process.cwd(),
-      windowsHide: true,
-    });
+  const templatePath = path.join(
+    process.cwd(),
+    "public",
+    "cv_template.docx",
+  );
 
-    let stderr = "";
-    child.stderr.on("data", (chunk) => {
-      stderr += chunk.toString();
-    });
+  let templateBuffer: Buffer;
+  try {
+    templateBuffer = fs.readFileSync(templatePath);
+  } catch {
+    return Response.json(
+      { error: "Template not found at public/cv_template.docx" },
+      { status: 500 },
+    );
+  }
 
-    child.on("error", reject);
-    child.on("close", (code) => {
-      if (code === 0) {
-        resolve();
-      } else {
-        reject(new Error(stderr || `Python renderer exited with code ${code}`));
-      }
+  const data = buildRenderContext(state);
+
+  let outBuffer: Buffer;
+  try {
+    const zip = new PizZip(templateBuffer);
+    const doc = new Docxtemplater(zip, {
+      paragraphLoop: true,
+      linebreaks: true,
     });
+    doc.render(data);
+    outBuffer = doc.getZip().generate({
+      type: "nodebuffer",
+      compression: "DEFLATE",
+    });
+  } catch (err) {
+    // Docxtemplater throws a structured error with `.properties.errors` —
+    // surface the per-tag details so template bugs are debuggable.
+    const e = err as {
+      message?: string;
+      properties?: { errors?: { message: string; properties: unknown }[] };
+    };
+    return Response.json(
+      {
+        error: e.message ?? "Failed to render template.",
+        details: e.properties?.errors ?? null,
+      },
+      { status: 500 },
+    );
+  }
+
+  const safeName =
+    (state.candidate?.name ?? "cv")
+      .replace(/[^a-zA-Z0-9-_ ]+/g, "")
+      .trim()
+      .replace(/\s+/g, "_") || "cv";
+
+  return new Response(new Uint8Array(outBuffer), {
+    headers: {
+      "Content-Type":
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      "Content-Disposition": `attachment; filename="${safeName}.docx"`,
+      "Cache-Control": "no-store",
+    },
   });
 }

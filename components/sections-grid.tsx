@@ -21,7 +21,7 @@ export function SectionsGrid({ sections, onSectionChange }: SectionsGridProps) {
             Final output is grouped into the six render-ready sections.
           </p>
         </div>
-        <Badge tone="green">{sections.filter((section) => section.content.length).length}/6 ready</Badge>
+        <Badge tone="green">{sections.filter((section) => section.content.some((l) => l.trim())).length}/6 ready</Badge>
       </CardHeader>
       <CardContent>
         <div className="grid gap-3 lg:grid-cols-2 xl:grid-cols-3">
@@ -40,8 +40,8 @@ export function SectionsGrid({ sections, onSectionChange }: SectionsGridProps) {
                     </span>
                     <h3 className="text-sm font-semibold">{section.title}</h3>
                   </div>
-                  <Badge tone={section.content.length ? "green" : "neutral"}>
-                    {section.content.length ? "Ready" : "Pending"}
+                  <Badge tone={section.content.some((l) => l.trim()) ? "green" : "neutral"}>
+                    {section.content.some((l) => l.trim()) ? "Ready" : "Pending"}
                   </Badge>
                 </div>
                 <textarea

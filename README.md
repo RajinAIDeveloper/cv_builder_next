@@ -53,7 +53,7 @@ The frontend visualises the live LangGraph execution: a workflow diagram with st
 │   ────────────────────────────────────                              │
 │     parseJd ──┐                                                     │
 │               ├─> tailorExperience ─> expCritic ─> expReviser ──┐   │
-│     parseCv ──┤                                                  │   │
+│     parseCv ──┤                                                  │  │
 │               ├─> writeSummary ──── summaryCritic ── reviser ───┤   │
 │               ├─> orderEducation ── eduCritic ────── reviser ───┤   │
 │               ├─> filterTraining ────────────────────────────────│  │
@@ -221,6 +221,7 @@ Create a `.env.local` in the project root.
 
 | Variable | Required | Default | Notes |
 |---|---|---|---|
+
 | `LLM_PROVIDER` | no | `anthropic` | `anthropic` or `openai`. |
 | `ANTHROPIC_API_KEY` | conditional | — | Required if `LLM_PROVIDER=anthropic`. |
 | `OPENAI_API_KEY` | conditional | — | Required if `LLM_PROVIDER=openai`. |

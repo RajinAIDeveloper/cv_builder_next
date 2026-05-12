@@ -443,3 +443,70 @@ function keywordLine(value: string) {
   const unique = Array.from(new Set(matches)).slice(0, 4);
   return unique.length ? `keywords: ${unique.join(", ")}` : "keywords pending";
 }
+
+// ============================================================================
+// Graph ↔ UI node-name map
+// ============================================================================
+
+/**
+ * The agent's LangGraph emits node names in camelCase (e.g. "writeSummary").
+ * The UI's workflow diagram uses kebab-case IDs (e.g. "summary").
+ *
+ * This map is the single source of truth for translating between them.
+ * Any LangGraph node not in this map won't light up in the UI — which is the
+ * correct behavior for nodes that don't have a UI counterpart.
+ */
+export const GRAPH_TO_UI_NODE: Partial<Record<string, WorkflowNodeId>> = {
+  parseJd: "parse-jd",
+  parseCv: "parse-cv",
+
+  writeSummary: "summary",
+  summaryCritic: "summary-critic",
+  summaryReviser: "summary-reviser",
+
+  tailorExperience: "tailor-experience",
+  experienceCritic: "experience-critic",
+  experienceReviser: "experience-reviser",
+
+  // Single-shot lanes.
+  filterTraining: "training",
+  extractOthers: "others",
+
+  // References lane (extractor → critic → reviser).
+  extractReferences: "references",
+  referencesCritic: "references-critic",
+  referencesReviser: "references-reviser",
+
+  // NOTE: extractEducation has no UI counterpart yet — the scaffold only
+  // declared an education-critic/-reviser pair. Adding a plain `education`
+  // node to the UI is a 1-line follow-up; for now the event is silently
+  // dropped from the workflow diagram. The section card still fills via
+  // stateKeysToSectionIds.
+};
+
+/**
+ * Translate a graph node name (whatever LangGraph emitted) to the UI ID
+ * that should light up. Returns null if the node has no UI counterpart.
+ */
+export function graphToUiNodeId(graphNode: string): WorkflowNodeId | null {
+  return GRAPH_TO_UI_NODE[graphNode] ?? null;
+}
+
+/**
+ * Translate state-update keys into the section IDs the SectionsGrid renders.
+ * A node patch like { summary: {...} } means "section.summary is ready".
+ */
+export const STATE_KEY_TO_SECTION: Record<string, CvSectionId> = {
+  summary: "summary",
+  experience: "experience",
+  education: "education",
+  training: "training",
+  others: "others",
+  references: "references",
+};
+
+export function stateKeysToSectionIds(keys: string[]): CvSectionId[] {
+  return keys
+    .map((k) => STATE_KEY_TO_SECTION[k])
+    .filter((id): id is CvSectionId => Boolean(id));
+}
