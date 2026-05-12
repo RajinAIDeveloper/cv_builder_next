@@ -1,11 +1,12 @@
 "use client";
 
-import { ChangeEvent } from "react";
+import { ChangeEvent, useState } from "react";
 import { FileText, Upload } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { cn } from "@/lib/utils";
+import { extractTextFromPdf } from "@/lib/pdf-extract";
 
 type FileInputPanelProps = {
   title: string;
@@ -24,11 +25,15 @@ export function FileInputPanel({
   onTextChange,
   onFileNameChange,
 }: FileInputPanelProps) {
+  const [isExtracting, setIsExtracting] = useState(false);
+  const [error, setError] = useState<string>("");
+
   async function handleFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
     if (!file) return;
 
     onFileNameChange(file.name);
+    setError("");
 
     if (file.type === "text/plain" || file.name.toLowerCase().endsWith(".txt")) {
       onTextChange(await file.text());
@@ -36,13 +41,19 @@ export function FileInputPanel({
     }
 
     if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
-      onTextChange(
-        [
-          `${file.name}`,
-          "PDF uploaded. Text extraction will be handled by the backend parser.",
-          "For this UI preview, paste extracted text here to simulate the graph with content.",
-        ].join("\n"),
-      );
+      setIsExtracting(true);
+      try {
+        const text = await extractTextFromPdf(file);
+        if (!text) {
+          setError("No text could be extracted — is this a scanned/image PDF?");
+        }
+        onTextChange(text);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`PDF extraction failed: ${msg}`);
+      } finally {
+        setIsExtracting(false);
+      }
     }
   }
 
@@ -63,10 +74,21 @@ export function FileInputPanel({
           )}
         >
           <Upload className="mb-2 size-5 text-slate-600" />
-          <span className="text-sm font-medium text-slate-900">Upload plain text or PDF</span>
-          <span className="mt-1 text-xs text-slate-500">TXT is read in-browser. PDF is queued for backend extraction.</span>
-          <input className="sr-only" type="file" accept=".txt,.pdf,text/plain,application/pdf" onChange={handleFile} />
+          <span className="text-sm font-medium text-slate-900">
+            {isExtracting ? "Extracting PDF text…" : "Upload plain text or PDF"}
+          </span>
+          <span className="mt-1 text-xs text-slate-500">
+            Both TXT and PDF are parsed in your browser — files never leave the device.
+          </span>
+          <input
+            className="sr-only"
+            type="file"
+            accept=".txt,.pdf,text/plain,application/pdf"
+            onChange={handleFile}
+            disabled={isExtracting}
+          />
         </label>
+        {error ? <p className="text-xs text-red-600">{error}</p> : null}
 
         <div className="space-y-2">
           <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
