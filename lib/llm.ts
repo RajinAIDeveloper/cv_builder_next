@@ -11,6 +11,7 @@ import { ChatOpenAI } from "@langchain/openai";
  * AIShop24H is OpenAI-compatible — same request/response shape as OpenAI's
  * own API — so we use the OpenAI client and just point it at a different URL.
  */
+
 export function makeLlm(opts: { model?: string } = {}) {
   const apiKey = process.env.AISHOP24H_API_KEY;
   const baseURL = process.env.AISHOP24H_BASE_URL ?? "https://aishop24h.com/v1";

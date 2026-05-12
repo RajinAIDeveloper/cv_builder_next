@@ -3,6 +3,7 @@ import {
   graphToUiNodeId,
   stateKeysToSectionIds,
 } from "@/lib/workflow";
+import { validateCvAndJdInputs } from "@/lib/input-validation";
 import { withUsageTracking, type UsageSnapshot } from "@/lib/usage";
 import { z } from "zod";
 
@@ -13,6 +14,9 @@ const Body = z.object({
   raw_jd: z.string().min(20),
   raw_cv: z.string().min(20),
 });
+
+const GRAPH_MAX_CONCURRENCY = readPositiveInt("GRAPH_MAX_CONCURRENCY", 2);
+const SSE_HEARTBEAT_MS = readPositiveInt("SSE_HEARTBEAT_MS", 15_000);
 
 export async function POST(request: Request) {
   let json: unknown;
@@ -27,6 +31,10 @@ export async function POST(request: Request) {
       { error: "Invalid body", issues: parsed.error.issues },
       { status: 400 },
     );
+  }
+  const validation = validateCvAndJdInputs(parsed.data.raw_cv, parsed.data.raw_jd);
+  if (!validation.ok) {
+    return Response.json({ error: validation.message }, { status: 400 });
   }
 
   const stream = iteratorToStream(makeGraphIterator(parsed.data));
@@ -101,7 +109,7 @@ async function* makeGraphIterator(input: { raw_jd: string; raw_cv: string }) {
         const graph = buildGraph();
         const events = await graph.stream(
           { rawJd: input.raw_jd, rawCv: input.raw_cv },
-          { streamMode: "updates" },
+          { streamMode: "updates", maxConcurrency: GRAPH_MAX_CONCURRENCY },
         );
         const final: Record<string, unknown> = {};
         for await (const chunk of events) {
@@ -146,11 +154,24 @@ async function* makeGraphIterator(input: { raw_jd: string; raw_cv: string }) {
   // Drain pump.
   while (true) {
     if (queue.length === 0) {
-      await wait();
+      await Promise.race([
+        wait(),
+        new Promise<void>((resolve) => setTimeout(resolve, SSE_HEARTBEAT_MS)),
+      ]);
+      if (queue.length === 0) {
+        yield encoder.encode(`: heartbeat ${Date.now()}\n\n`);
+      }
       continue;
     }
     const item = queue.shift()!;
     if (item === END) break;
     yield item;
   }
+}
+
+function readPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }

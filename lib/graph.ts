@@ -70,7 +70,7 @@ async function othersNode(s: CvBuilderStateType): Promise<CvBuilderStateUpdate> 
 // Reflexion-loop nodes — writer / critic / reviser per lane
 // ============================================================================
 
-// --- Summary lane ---
+// --- Summary lane --- //
 
 async function writeSummaryNode(
   s: CvBuilderStateType,

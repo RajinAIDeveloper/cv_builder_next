@@ -3,6 +3,34 @@ import { HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { z } from "zod";
 import { recordLlmUsage } from "@/lib/usage";
 
+type ZodDefLike = {
+  type?: string;
+  innerType?: z.ZodTypeAny;
+  values?: string[];
+};
+
+type ZodIntrospectable = z.ZodTypeAny & {
+  _def?: ZodDefLike;
+  shape?: Record<string, z.ZodTypeAny>;
+  element?: z.ZodTypeAny;
+  description?: string;
+  options?: string[];
+};
+
+const DEFAULT_RPM_LIMIT = 6;
+const DEFAULT_MAX_CONCURRENT = 1;
+
+const rpmLimit = readPositiveInt("LLM_RPM_LIMIT", DEFAULT_RPM_LIMIT);
+const maxConcurrent = readPositiveInt(
+  "LLM_MAX_CONCURRENT_REQUESTS",
+  DEFAULT_MAX_CONCURRENT,
+);
+const minStartGapMs = Math.ceil(60_000 / rpmLimit);
+
+let activeCalls = 0;
+let nextStartAt = 0;
+const waitQueue: Array<() => void> = [];
+
 /**
  * Provider-agnostic structured output.
  *
@@ -64,7 +92,7 @@ export async function callStructured<T extends z.ZodTypeAny>(
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
-  } catch (err) {
+  } catch {
     throw new Error(
       `Model did not return valid JSON. First 200 chars: ${text.slice(0, 200)}`,
     );
@@ -95,11 +123,12 @@ export async function callStructured<T extends z.ZodTypeAny>(
  * object, wrap it. Runs recursively into nested objects/arrays.
  */
 function coerceSingletonArrays(value: unknown, schema: z.ZodTypeAny): unknown {
-  const def = (schema as any)._def;
+  const zodSchema = schema as ZodIntrospectable;
+  const def = zodSchema._def;
   const kind: string | undefined = def?.type;
 
   if (kind === "object" && value !== null && typeof value === "object") {
-    const shape = (schema as any).shape as Record<string, z.ZodTypeAny>;
+    const shape = zodSchema.shape ?? {};
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(shape)) {
       out[key] = coerceSingletonArrays(
@@ -116,7 +145,8 @@ function coerceSingletonArrays(value: unknown, schema: z.ZodTypeAny): unknown {
   }
 
   if (kind === "array") {
-    const inner = (schema as any).element as z.ZodTypeAny;
+    const inner = zodSchema.element;
+    if (!inner) return value;
     if (Array.isArray(value)) {
       return value.map((item) => coerceSingletonArrays(item, inner));
     }
@@ -128,6 +158,7 @@ function coerceSingletonArrays(value: unknown, schema: z.ZodTypeAny): unknown {
   }
 
   if (kind === "optional" || kind === "default" || kind === "nullable") {
+    if (!def?.innerType) return value;
     return coerceSingletonArrays(value, def.innerType);
   }
 
@@ -153,9 +184,10 @@ async function invokeWithRateLimitRetry(
     total_tokens?: number;
   };
 }> {
-  const delays = [2_000, 4_000, 8_000, 16_000, 32_000];
+  const delays = [10_000, 20_000, 40_000, 60_000, 60_000];
   let lastErr: unknown;
   for (let attempt = 0; attempt <= delays.length; attempt++) {
+    const release = await acquireLlmSlot();
     try {
       return (await llm.invoke(messages)) as Awaited<
         ReturnType<typeof invokeWithRateLimitRetry>
@@ -180,9 +212,46 @@ async function invokeWithRateLimitRetry(
         `[llm] ${reason}; retry ${attempt + 1}/${delays.length} in ${delay / 1000}s — ${message}`,
       );
       await new Promise((r) => setTimeout(r, delay));
+    } finally {
+      release();
     }
   }
   throw lastErr;
+}
+
+async function acquireLlmSlot(): Promise<() => void> {
+  while (activeCalls >= maxConcurrent) {
+    await new Promise<void>((resolve) => waitQueue.push(resolve));
+  }
+
+  activeCalls += 1;
+
+  const now = Date.now();
+  const waitMs = Math.max(0, nextStartAt - now);
+  nextStartAt = Math.max(now, nextStartAt) + minStartGapMs;
+
+  if (waitMs > 0) {
+    console.log(
+      `[llm] throttling ${Math.ceil(waitMs / 1000)}s ` +
+        `(rpm=${rpmLimit}, maxConcurrent=${maxConcurrent})`,
+    );
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
+  }
+
+  let released = false;
+  return () => {
+    if (released) return;
+    released = true;
+    activeCalls = Math.max(0, activeCalls - 1);
+    waitQueue.shift()?.();
+  };
+}
+
+function readPositiveInt(name: string, fallback: number): number {
+  const raw = process.env[name];
+  if (!raw) return fallback;
+  const value = Number.parseInt(raw, 10);
+  return Number.isFinite(value) && value > 0 ? value : fallback;
 }
 
 function collectCauseMessages(err: unknown, depth = 0): string[] {
@@ -215,14 +284,14 @@ function stripFences(text: string): string {
  */
 function describeZod(schema: z.ZodTypeAny, indent = 0): string {
   const pad = "  ".repeat(indent);
-  const anySchema = schema as any;
-  const kind: string | undefined = anySchema?._def?.type;
+  const zodSchema = schema as ZodIntrospectable;
+  const kind: string | undefined = zodSchema._def?.type;
 
   if (kind === "object") {
-    const shape = anySchema.shape as Record<string, z.ZodTypeAny>;
+    const shape = zodSchema.shape ?? {};
     const entries = Object.entries(shape);
     const lines = entries.map(([key, value]) => {
-      const desc = (value as any).description;
+      const desc = (value as ZodIntrospectable).description;
       const type = describeZod(value, indent + 1);
       const descSuffix = desc ? `  // ${desc}` : "";
       return `${pad}  "${key}": ${type}${descSuffix}`;
@@ -233,13 +302,13 @@ function describeZod(schema: z.ZodTypeAny, indent = 0): string {
   if (kind === "number") return "number";
   if (kind === "boolean") return "boolean";
   if (kind === "array") {
-    return `${describeZod(anySchema.element, indent)}[]`;
+    return `${describeZod(zodSchema.element ?? z.unknown(), indent)}[]`;
   }
   if (kind === "optional" || kind === "default" || kind === "nullable") {
-    return describeZod(anySchema._def.innerType, indent);
+    return describeZod(zodSchema._def?.innerType ?? z.unknown(), indent);
   }
   if (kind === "enum") {
-    const values: string[] = anySchema._def.values ?? anySchema.options ?? [];
+    const values: string[] = zodSchema._def?.values ?? zodSchema.options ?? [];
     return values.map((v) => `"${v}"`).join(" | ");
   }
   return "any";

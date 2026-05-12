@@ -16,6 +16,7 @@ import {
   workflowNodes,
   WorkflowStatus,
 } from "@/lib/workflow";
+import { validateCvAndJdInputs } from "@/lib/input-validation";
 import { applyPatchToMemory, renderSectionContent } from "@/lib/ui-format";
 import { sectionsToRenderContext } from "@/lib/sections-to-render";
 
@@ -75,6 +76,7 @@ export function CvBuilderApp() {
     cost: number;
     calls: number;
   } | null>(null);
+  const [runError, setRunError] = useState("");
   const cancelRef = useRef(false);
   const timerRef = useRef<number | null>(null);
   // Accumulated final state from /api/run's `done` event; sent verbatim to
@@ -95,8 +97,14 @@ export function CvBuilderApp() {
 
   async function runWorkflow() {
     if (!canRun || isRunning) return;
+    const validation = validateCvAndJdInputs(cvText, jdText);
+    if (!validation.ok) {
+      setRunError(validation.message);
+      return;
+    }
 
     cancelRef.current = false;
+    setRunError("");
     finalStateRef.current = null;
     setUsage(null);
     setIsRunning(true);
@@ -120,7 +128,8 @@ export function CvBuilderApp() {
       });
 
       if (!response.ok || !response.body) {
-        throw new Error(`Agent run failed (HTTP ${response.status}).`);
+        const message = await readErrorResponse(response);
+        throw new Error(message || `Agent run failed (HTTP ${response.status}).`);
       }
 
       const reader = response.body.getReader();
@@ -149,6 +158,7 @@ export function CvBuilderApp() {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       pushLogLines([`ERROR: ${msg}`]);
+      setRunError(msg);
       setIsRunning(false);
       setActiveNode(null);
       clearElapsedTimer(timerRef);
@@ -245,6 +255,7 @@ export function CvBuilderApp() {
     setMemory(initialMemory);
     setSections(sectionShells.map((section) => ({ ...section, content: [] })));
     setPhase("input");
+    setRunError("");
     setLogLines([]);
     clearElapsedTimer(timerRef);
     setElapsedSec(0);
@@ -323,6 +334,11 @@ export function CvBuilderApp() {
             <p className="mt-2 max-w-3xl text-sm leading-6 text-slate-600">
               {descriptionForPhase(phase)}
             </p>
+            {runError ? (
+              <div className="mt-3 max-w-3xl rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm leading-6 text-red-700">
+                {runError}
+              </div>
+            ) : null}
             {/* Running-phase progress is now shown in the loader card below. */}
           </div>
           <div className="flex flex-wrap gap-2">
@@ -505,4 +521,13 @@ function safeJson<T>(data: string): T | null {
   } catch {
     return null;
   }
+}
+
+async function readErrorResponse(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) {
+    const body = (await response.json()) as { error?: string };
+    return body.error ?? "";
+  }
+  return response.text();
 }

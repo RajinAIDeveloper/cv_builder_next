@@ -107,6 +107,7 @@ export function renderSectionContent(
         | { roles: { company: string; title: string; dates: string; bullets: { text: string }[] }[] }
         | undefined;
       if (!e) return null;
+      if (e.roles.length === 0) return ["No experience roles found in the CV input."];
       const lines: string[] = [];
       for (const r of e.roles) {
         lines.push(`${r.title} — ${r.company} (${r.dates})`);
@@ -119,6 +120,7 @@ export function renderSectionContent(
         | { degree: string; institution: string; year: string }[]
         | undefined;
       if (!arr) return null;
+      if (arr.length === 0) return ["No education entries found in the CV input."];
       return arr.map((x) => `${x.degree}, ${x.institution} (${x.year})`);
     }
     case "training": {
@@ -126,9 +128,11 @@ export function renderSectionContent(
         | { items: { title: string; year: string; keep: boolean }[] }
         | undefined;
       if (!t) return null;
-      return t.items
+      if (t.items.length === 0) return ["No training items found in the CV input."];
+      const kept = t.items
         .filter((i) => i.keep)
         .map((i) => `${i.title}${i.year ? ` (${i.year})` : ""}`);
+      return kept.length > 0 ? kept : ["No JD-relevant training items were kept."];
     }
     case "others": {
       const o = patch.others as
@@ -147,6 +151,7 @@ export function renderSectionContent(
         | { references: { name: string; designation: string; company: string; mobile: string; email: string }[] }
         | undefined;
       if (!r) return null;
+      if (r.references.length === 0) return ["No references found in the CV input."];
       return r.references.map(
         (x) =>
           `${x.name} | ${x.designation} | ${x.company} | ${x.mobile} | ${x.email}`,
